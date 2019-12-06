@@ -6,19 +6,26 @@
 
 # NOTE: This build is currently only supporting x86 targets, for other targets use the original makefile. Please do not submit bugs to the LuaJIT author in case this build fails, instead use http://github.com/LuaDist/luajit
 
-project ( luajit C ASM)
+project ( luajit C ASM )
 cmake_minimum_required ( VERSION 2.8 )
 include ( cmake/dist.cmake )
 include ( lua )
 
 ## CONFIGURATION
+# Cuberite configuration
+if ( ${CMAKE_CURRENT_SOURCE_DIR} MATCHES "[Cc]uberite" )
+  option ( LUA_CUBERITE "Provides compatibility with Cuberite builds." ON )
+else ()
+  option ( LUA_CUBERITE "Provides compatibility with Cuberite builds." OFF )
+endif ()
+
 # Default configuration (we assume POSIX by default)
 set ( LUA_PATH "LUA_PATH" CACHE STRING "Environment variable to use as package.path." )
 set ( LUA_CPATH "LUA_CPATH" CACHE STRING "Environment variable to use as package.cpath." )
 set ( LUA_INIT "LUA_INIT" CACHE STRING "Environment variable for initial script." )
 
 option ( LUA_ANSI "Use only ansi features." OFF )
-option ( LUA_USE_RELATIVE_LOADLIB "Use modified loadlib.c with support for relative paths on posix systems." ON)
+option ( LUA_USE_RELATIVE_LOADLIB "Use modified loadlib.c with support for relative paths on posix systems." ON )
 set ( LUA_IDSIZE 60 CACHE NUMBER "gives the maximum size for the description of the source." )
 set ( LUA_PROMPT "> " CACHE STRING "Is the default prompt used by stand-alone Lua." )
 set ( LUA_PROMPT2 ">> " CACHE STRING "Is the default continuation prompt used by stand-alone Lua." )
@@ -132,6 +139,9 @@ endif ()
 ## SOURCES
 # Generate luaconf.h
 configure_file ( src/luaconf.h.in ${CMAKE_CURRENT_BINARY_DIR}/luaconf.h )
+if ( LUA_CUBERITE )
+  configure_file( ${CMAKE_CURRENT_BINARY_DIR}/luaconf.h ${CMAKE_CURRENT_SOURCE_DIR}/src/luaconf.h COPYONLY )
+endif ()
 
 set ( LJLIB_C
   src/lib_base.c
@@ -166,7 +176,7 @@ set ( DASM_FLAGS -D FPU -D HFABI )
 set ( DASM_ARCH x86 )
 
 # Raspberry PI, ARM
-if ( ${CMAKE_SYSTEM_PROCESSOR} MATCHES "armv6l" )
+if ( ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^arm" )
   set ( DASM_ARCH arm )
   list ( APPEND DASM_FLAGS -D DUALNUM )
   set ( DASM_VER 60 )
@@ -255,6 +265,7 @@ set ( LJCORE_C
   src/lj_char.c
   src/lj_bc.c
   src/lj_obj.c
+  src/lj_buf.c
   src/lj_str.c
   src/lj_tab.c
   src/lj_func.c
@@ -266,7 +277,10 @@ set ( LJCORE_C
   src/lj_vmevent.c
   src/lj_vmmath.c
   src/lj_strscan.c
+  src/lj_strfmt.c
+  src/lj_strfmt_num.c
   src/lj_api.c
+  src/lj_profile.c
   src/lj_lex.c
   src/lj_parse.c
   src/lj_bcread.c
@@ -303,26 +317,98 @@ set ( LJCORE_C
   ${LJLIB_C}
 )
 
-add_library ( liblua SHARED ${LJCORE_C} ${DEPS} )
-target_link_libraries ( liblua ${LIBS} )
-set_target_properties ( liblua PROPERTIES OUTPUT_NAME lua CLEAN_DIRECT_OUTPUT 1 )
+# Avoid conflict with luaexpat
+add_definitions ( -DLUA_BUILD_INTERNAL )
 
-## LuaJIT Executable
-add_executable ( luajit src/luajit.c src/luajit.rc )
-target_link_libraries ( luajit liblua )
+if ( LUA_CUBERITE )
+  # Lua needs to be linked dynamically on Windows and statically on *nix, so that LuaRocks work
+  if( WIN32 )
+    add_library ( lua SHARED ${LJCORE_C} ${DEPS} )
 
-# On Windows build a no-console variant also
-if ( LUA_BUILD_WLUA )
-  add_executable ( wluajit WIN32 src/wmain.c src/luajit.c src/luajit.rc )
-  target_link_libraries ( wluajit liblua )
-  install_executable ( wluajit )
+    # Output the DLL into the $/Server folder, so that Cuberite can find it:
+    set ( EXECUTABLE_OUTPUT_PATH ${CMAKE_SOURCE_DIR}/Server )
+
+    set_target_properties ( lua PROPERTIES
+      ARCHIVE_OUTPUT_DIRECTORY_DEBUG          ${CMAKE_SOURCE_DIR}/Server
+      ARCHIVE_OUTPUT_DIRECTORY_RELEASE        ${CMAKE_SOURCE_DIR}/Server
+      ARCHIVE_OUTPUT_DIRECTORY_DEBUGPROFILE   ${CMAKE_SOURCE_DIR}/Server
+      ARCHIVE_OUTPUT_DIRECTORY_RELEASEPROFILE ${CMAKE_SOURCE_DIR}/Server
+      LIBRARY_OUTPUT_DIRECTORY_DEBUG          ${CMAKE_SOURCE_DIR}/Server
+      LIBRARY_OUTPUT_DIRECTORY_RELEASE        ${CMAKE_SOURCE_DIR}/Server
+      LIBRARY_OUTPUT_DIRECTORY_DEBUGPROFILE   ${CMAKE_SOURCE_DIR}/Server
+      LIBRARY_OUTPUT_DIRECTORY_RELEASEPROFILE ${CMAKE_SOURCE_DIR}/Server
+      RUNTIME_OUTPUT_DIRECTORY_DEBUG          ${CMAKE_SOURCE_DIR}/Server
+      RUNTIME_OUTPUT_DIRECTORY_RELEASE        ${CMAKE_SOURCE_DIR}/Server
+      RUNTIME_OUTPUT_DIRECTORY_DEBUGPROFILE   ${CMAKE_SOURCE_DIR}/Server
+      RUNTIME_OUTPUT_DIRECTORY_RELEASEPROFILE ${CMAKE_SOURCE_DIR}/Server
+    )
+
+    # NOTE: The DLL for each configuration is stored at the same place, thus overwriting each other.
+    # This is known, however such behavior is needed for LuaRocks - they always load "lua5.1.dll" or "lua51.dll"
+    # We make it work by compiling to "lua51.dll" and providing a proxy-DLL "lua5.1.dll"
+    # See http://lua-users.org/wiki/LuaProxyDllFour for details
+    set_target_properties ( lua PROPERTIES OUTPUT_NAME "lua51" PREFIX "" )
+  else ()
+    add_library ( lua ${LJCORE_C} ${DEPS} )
+  endif ()
+
+  target_link_libraries ( lua ${LIBS} )
+
+  # Tell the compiler to use C++ when compiling the library,
+  # so that Lua uses C++ exceptions instead of setjmp / longjmp (GH #3678):
+  set_source_files_properties(${SOURCE} PROPERTIES LANGUAGE CXX)
+
+else ()
+  add_library ( liblua ${LJCORE_C} ${DEPS} )
+  target_link_libraries ( liblua ${LIBS} )
+  set_target_properties ( liblua PROPERTIES OUTPUT_NAME lua CLEAN_DIRECT_OUTPUT 1 )
 endif ()
 
-## INSTALL
-install_executable( luajit )
-install_library( liblua )
-install_header( src/lua.h src/luajit.h src/lua.hpp ${CMAKE_CURRENT_BINARY_DIR}/luaconf.h src/lualib.h src/lauxlib.h )
 
-install_doc ( doc/ )
-install_foo ( etc/ )
-install_data ( COPYRIGHT README.md )
+if ( LUA_CUBERITE )
+  add_executable ( luaexe src/luajit.c src/luajit.rc )
+
+  # If system-wide Lua is not available, build a local one:
+  if ( NOT USE_SYSTEM_LUA )
+    target_link_libraries ( luaexe lua )
+    set_target_properties ( luaexe PROPERTIES
+      ARCHIVE_OUTPUT_DIRECTORY_DEBUG          ${CMAKE_SOURCE_DIR}/Server
+      ARCHIVE_OUTPUT_DIRECTORY_RELEASE        ${CMAKE_SOURCE_DIR}/Server
+      ARCHIVE_OUTPUT_DIRECTORY_DEBUGPROFILE   ${CMAKE_SOURCE_DIR}/Server
+      ARCHIVE_OUTPUT_DIRECTORY_RELEASEPROFILE ${CMAKE_SOURCE_DIR}/Server
+      LIBRARY_OUTPUT_DIRECTORY_DEBUG          ${CMAKE_SOURCE_DIR}/Server
+      LIBRARY_OUTPUT_DIRECTORY_RELEASE        ${CMAKE_SOURCE_DIR}/Server
+      LIBRARY_OUTPUT_DIRECTORY_DEBUGPROFILE   ${CMAKE_SOURCE_DIR}/Server
+      LIBRARY_OUTPUT_DIRECTORY_RELEASEPROFILE ${CMAKE_SOURCE_DIR}/Server
+      RUNTIME_OUTPUT_DIRECTORY_DEBUG          ${CMAKE_SOURCE_DIR}/Server
+      RUNTIME_OUTPUT_DIRECTORY_RELEASE        ${CMAKE_SOURCE_DIR}/Server
+      RUNTIME_OUTPUT_DIRECTORY_DEBUGPROFILE   ${CMAKE_SOURCE_DIR}/Server
+      RUNTIME_OUTPUT_DIRECTORY_RELEASEPROFILE ${CMAKE_SOURCE_DIR}/Server
+    )
+
+    if (MSVC)
+      set_target_properties ( luaexe PROPERTIES FOLDER Support )
+    endif ()
+  endif ()
+
+else ()
+  ## LuaJIT Executable
+  add_executable ( luajit src/luajit.c src/luajit.rc )
+  target_link_libraries ( luajit liblua )
+
+  # On Windows build a no-console variant also
+  if ( LUA_BUILD_WLUA )
+    add_executable ( wluajit WIN32 src/wmain.c src/luajit.c src/luajit.rc )
+    target_link_libraries ( wluajit liblua )
+    install_executable ( wluajit )
+  endif ()
+
+  ## INSTALL
+  install_executable( luajit )
+  install_library( liblua )
+  install_header( src/lua.h src/luajit.h src/lua.hpp ${CMAKE_CURRENT_BINARY_DIR}/luaconf.h src/lualib.h src/lauxlib.h )
+
+  install_doc ( doc/ )
+  install_foo ( etc/ )
+  install_data ( COPYRIGHT README.md )
+endif()
